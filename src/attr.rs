@@ -8,6 +8,7 @@ use std::str::FromStr;
 pub fn expand_attr(
     attr: TokenStream,
     span: Span,
+    end: char,
     contains_paste: &mut bool,
 ) -> Result<TokenStream> {
     let mut tokens = attr.clone().into_iter();
@@ -40,7 +41,7 @@ pub fn expand_attr(
                 if tokens.inspect(|_| count += 1).all(|tt| is_stringlike(&tt)) && count > 1 {
                     *contains_paste = true;
                     let leading = leading_colons + leading_path;
-                    return do_paste_name_value_attr(attr, span, leading);
+                    return do_paste_name_value_attr(attr, span, leading, end);
                 }
                 return Ok(attr);
             }
@@ -69,6 +70,7 @@ pub fn expand_attr(
                 expanded.extend(expand_attr(
                     nested_attr,
                     group.span(),
+                    end,
                     &mut group_contains_paste,
                 )?);
                 expanded.extend(iter::once(tt));
@@ -82,6 +84,7 @@ pub fn expand_attr(
         expanded.extend(expand_attr(
             nested_attr,
             group.span(),
+            end,
             &mut group_contains_paste,
         )?);
     }
@@ -101,12 +104,17 @@ pub fn expand_attr(
     }
 }
 
-fn do_paste_name_value_attr(attr: TokenStream, span: Span, leading: usize) -> Result<TokenStream> {
+fn do_paste_name_value_attr(
+    attr: TokenStream,
+    span: Span,
+    leading: usize,
+    end: char,
+) -> Result<TokenStream> {
     let mut expanded = TokenStream::new();
     let mut tokens = attr.into_iter().peekable();
     expanded.extend(tokens.by_ref().take(leading + 1)); // `doc =`
 
-    let mut segments = segment::parse(&mut tokens)?;
+    let mut segments = segment::parse(&mut tokens, end)?;
 
     for segment in &mut segments {
         if let Segment::String(string) = segment {

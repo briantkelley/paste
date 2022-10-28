@@ -18,11 +18,14 @@ pub(crate) struct Colon {
     pub span: Span,
 }
 
-pub(crate) fn parse(tokens: &mut Peekable<token_stream::IntoIter>) -> Result<Vec<Segment>> {
+pub(crate) fn parse(
+    tokens: &mut Peekable<token_stream::IntoIter>,
+    end: char,
+) -> Result<Vec<Segment>> {
     let mut segments = Vec::new();
     while match tokens.peek() {
         None => false,
-        Some(TokenTree::Punct(punct)) => punct.as_char() != '>',
+        Some(TokenTree::Punct(punct)) => punct.as_char() != end,
         Some(_) => true,
     } {
         match tokens.next().unwrap() {
@@ -124,7 +127,7 @@ pub(crate) fn parse(tokens: &mut Peekable<token_stream::IntoIter>) -> Result<Vec
             TokenTree::Group(group) => {
                 if group.delimiter() == Delimiter::None {
                     let mut inner = group.stream().into_iter().peekable();
-                    let nested = parse(&mut inner)?;
+                    let nested = parse(&mut inner, end)?;
                     if let Some(unexpected) = inner.next() {
                         return Err(Error::new(unexpected.span(), "unexpected token"));
                     }
@@ -212,6 +215,9 @@ pub(crate) fn paste(segments: &[Segment]) -> Result<String> {
                             prev = ch;
                         }
                         evaluated.push(acc);
+                    }
+                    "len" => {
+                        evaluated.push(last.len().to_string());
                     }
                     _ => {
                         return Err(Error::new2(

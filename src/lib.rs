@@ -155,7 +155,7 @@ mod segment;
 use crate::attr::expand_attr;
 use crate::error::{Error, Result};
 use crate::segment::Segment;
-use proc_macro::{Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream, TokenTree};
+use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 use std::char;
 use std::iter;
 use std::panic;
@@ -221,10 +221,17 @@ fn expand(
                 let delimiter = group.delimiter();
                 let content = group.stream();
                 let span = group.span();
-                if delimiter == Delimiter::Bracket && is_paste_operation(&content) {
-                    let segments = parse_bracket_as_segments(content, span)?;
+                if delimiter == Delimiter::Bracket && is_paste_operation(&content, '<', '>') {
+                    let segments = parse_bracket_as_segments(content, span, '<', '>')?;
                     let pasted = segment::paste(&segments)?;
-                    let tokens = pasted_to_tokens(pasted, span)?;
+                    let tokens = pasted_to_tokens(pasted, span, pasted_to_ident)?;
+                    expanded.extend(tokens);
+                    *contains_paste = true;
+                } else if delimiter == Delimiter::Bracket && is_paste_operation(&content, '!', '!')
+                {
+                    let segments = parse_bracket_as_segments(content, span, '!', '!')?;
+                    let pasted = segment::paste(&segments)?;
+                    let tokens = pasted_to_tokens(pasted, span, pasted_to_literal)?;
                     expanded.extend(tokens);
                     *contains_paste = true;
                 } else if flatten_single_interpolation
@@ -243,7 +250,7 @@ fn expand(
                         flatten_single_interpolation && !is_attribute,
                     )?;
                     if is_attribute {
-                        nested = expand_attr(nested, span, &mut group_contains_paste)?;
+                        nested = expand_attr(nested, span, '>', &mut group_contains_paste)?;
                     }
                     let group = if group_contains_paste {
                         let mut group = Group::new(delimiter, nested);
@@ -330,18 +337,18 @@ fn is_single_interpolation_group(input: &TokenStream) -> bool {
     state == State::Ident || state == State::Literal || state == State::Lifetime
 }
 
-fn is_paste_operation(input: &TokenStream) -> bool {
+fn is_paste_operation(input: &TokenStream, begin: char, end: char) -> bool {
     let mut tokens = input.clone().into_iter();
 
     match &tokens.next() {
-        Some(TokenTree::Punct(punct)) if punct.as_char() == '<' => {}
+        Some(TokenTree::Punct(punct)) if punct.as_char() == begin => {}
         _ => return false,
     }
 
     let mut has_token = false;
     loop {
         match &tokens.next() {
-            Some(TokenTree::Punct(punct)) if punct.as_char() == '>' => {
+            Some(TokenTree::Punct(punct)) if punct.as_char() == end => {
                 return has_token && tokens.next().is_none();
             }
             Some(_) => has_token = true,
@@ -350,27 +357,42 @@ fn is_paste_operation(input: &TokenStream) -> bool {
     }
 }
 
-fn parse_bracket_as_segments(input: TokenStream, scope: Span) -> Result<Vec<Segment>> {
+fn parse_bracket_as_segments(
+    input: TokenStream,
+    scope: Span,
+    begin: char,
+    end: char,
+) -> Result<Vec<Segment>> {
     let mut tokens = input.into_iter().peekable();
 
     match &tokens.next() {
-        Some(TokenTree::Punct(punct)) if punct.as_char() == '<' => {}
-        Some(wrong) => return Err(Error::new(wrong.span(), "expected `<`")),
-        None => return Err(Error::new(scope, "expected `[< ... >]`")),
+        Some(TokenTree::Punct(punct)) if punct.as_char() == begin => {}
+        Some(wrong) => return Err(Error::new(wrong.span(), &format!("expected `{begin}`"))),
+        None => {
+            return Err(Error::new(
+                scope,
+                &format!("expected `[{begin} ... {end}]`"),
+            ))
+        }
     }
 
-    let mut segments = segment::parse(&mut tokens)?;
+    let mut segments = segment::parse(&mut tokens, end)?;
 
     match &tokens.next() {
-        Some(TokenTree::Punct(punct)) if punct.as_char() == '>' => {}
-        Some(wrong) => return Err(Error::new(wrong.span(), "expected `>`")),
-        None => return Err(Error::new(scope, "expected `[< ... >]`")),
+        Some(TokenTree::Punct(punct)) if punct.as_char() == end => {}
+        Some(wrong) => return Err(Error::new(wrong.span(), &format!("expected `{end}`"))),
+        None => {
+            return Err(Error::new(
+                scope,
+                &format!("expected `[{begin} ... {end}]`"),
+            ))
+        }
     }
 
     if let Some(unexpected) = tokens.next() {
         return Err(Error::new(
             unexpected.span(),
-            "unexpected input, expected `[< ... >]`",
+            &format!("unexpected input, expected `[{begin} ... {end}]`"),
         ));
     }
 
@@ -408,7 +430,11 @@ fn parse_bracket_as_segments(input: TokenStream, scope: Span) -> Result<Vec<Segm
     Ok(segments)
 }
 
-fn pasted_to_tokens(mut pasted: String, span: Span) -> Result<TokenStream> {
+fn pasted_to_tokens(
+    mut pasted: String,
+    span: Span,
+    f: fn(&str, Span) -> Result<TokenTree>,
+) -> Result<TokenStream> {
     let mut tokens = TokenStream::new();
 
     if pasted.starts_with('\'') {
@@ -418,16 +444,31 @@ fn pasted_to_tokens(mut pasted: String, span: Span) -> Result<TokenStream> {
         pasted.remove(0);
     }
 
-    let ident = match panic::catch_unwind(|| Ident::new(&pasted, span)) {
-        Ok(ident) => TokenTree::Ident(ident),
-        Err(_) => {
-            return Err(Error::new(
-                span,
-                &format!("`{:?}` is not a valid identifier", pasted),
-            ));
-        }
-    };
+    let tt = f(&pasted, span)?;
 
-    tokens.extend(iter::once(ident));
+    tokens.extend(iter::once(tt));
     Ok(tokens)
+}
+
+fn pasted_to_ident(pasted: &str, span: Span) -> Result<TokenTree> {
+    match panic::catch_unwind(|| Ident::new(&pasted, span)) {
+        Ok(ident) => Ok(TokenTree::Ident(ident)),
+        Err(_) => Err(Error::new(
+            span,
+            &format!("`{:?}` is not a valid identifier", pasted),
+        )),
+    }
+}
+
+fn pasted_to_literal(pasted: &str, span: Span) -> Result<TokenTree> {
+    match panic::catch_unwind(|| Literal::string(&pasted)) {
+        Ok(mut lit) => {
+            lit.set_span(span);
+            Ok(TokenTree::Literal(lit))
+        }
+        Err(_) => Err(Error::new(
+            span,
+            &format!("`{:?}` is not a valid literal", pasted),
+        )),
+    }
 }
